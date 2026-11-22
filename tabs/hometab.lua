@@ -32,8 +32,11 @@
 -- * membership: "Lifetime membership", or "Expires in 3d 4h" (live) for a timed key
 --   (reads lifetime / key_expires_at from getgenv().Y1_SESSION)
 -- * Current session: the tile shows the icon of the game you are in (until it loads, the first letter of the game)
--- * Account picture: click the Account icon to set a picture. Paste an image link (PNG or JPG) or the
---   file name of an image in your executor's workspace folder. It is copied to  Y1/account_<name>_<time>.png|jpg
+-- * Account picture: click the Account icon to set a picture. "Browse" opens a small file picker (PNG / JPG files,
+--   folders to open, an Up button, a Workspace button and a Downloads button that only works if your executor
+--   lets scripts open that folder). Or paste an image link (PNG or JPG), a full file
+--   path (works only if your executor allows files outside its workspace folder), or just a file name (it is
+--   searched for in the workspace folder and the folders inside it). It is copied to  Y1/account_<name>_<time>.png|jpg
 --   and remembered in  Y1/account_<name>.txt , so it is still there next time. "Remove" brings the icon back.
 --   (needs writefile / readfile / getcustomasset in your executor)
 -- * options (the Home table in main.lua is passed in as ctx):
@@ -801,12 +804,79 @@ function HomeTab.build(container, T, H, ctx)
 			end
 		end
 
+		local function tailName(path)
+			return string.lower(string.match(path, "([^/\\]+)$") or path)
+		end
+
+		-- looks for a file with this name in the workspace folder and the folders inside it
+		local function findInWorkspace(name)
+			local target = tailName(name)
+			local level = { "" }
+			local calls = 0
+			for depth = 1, 4 do
+				local nextLevel = {}
+				for i = 1, #level do
+					calls = calls + 1
+					if calls > 150 then
+						return nil
+					end
+					local list = safeCall(listfiles, level[i])
+					if list == nil and level[i] == "" then
+						list = safeCall(listfiles, ".")
+					end
+					if type(list) == "table" then
+						for j = 1, #list do
+							local path = list[j]
+							if safeCall(isfolder, path) == true then
+								nextLevel[#nextLevel + 1] = path
+							elseif tailName(path) == target then
+								return path
+							end
+						end
+					end
+				end
+				level = nextLevel
+				if #level == 0 then
+					break
+				end
+			end
+			return nil
+		end
+
+		-- the path as typed (full paths work when the executor allows them), then the workspace folders
+		local function readLocalFile(raw)
+			local typed = string.gsub(raw, "^[\"'](.*)[\"']$", "%1")
+			typed = string.gsub(typed, "^file:///", "")
+			local forward = string.gsub(typed, "\\", "/")
+
+			local function tryRead(path)
+				if safeCall(isfile, path) ~= true then
+					return nil
+				end
+				local data = safeCall(readfile, path)
+				if type(data) == "string" and data ~= "" then
+					return data
+				end
+				return nil
+			end
+
+			local data = tryRead(typed) or tryRead(forward)
+			if data then
+				return data
+			end
+			local found = findInWorkspace(typed)
+			if found then
+				return tryRead(found)
+			end
+			return nil
+		end
+
 		-- returns true, or false and a message
 		local function applyInput(raw)
 			raw = string.gsub(raw, "^%s+", "")
 			raw = string.gsub(raw, "%s+$", "")
 			if raw == "" then
-				return false, "Type an image link or a file name first."
+				return false, "Type an image link or a file path first."
 			end
 			if not (getcustomasset or getsynasset) then
 				return false, "Your executor can't show local images."
@@ -819,12 +889,12 @@ function HomeTab.build(container, T, H, ctx)
 					return false, "Could not download that link."
 				end
 			else
-				if safeCall(isfile, raw) ~= true then
+				bytes = readLocalFile(raw)
+				if not bytes then
+					if string.match(raw, "^%a:[/\\]") or string.match(raw, "^[/~]") then
+						return false, "Your executor can't open files outside its workspace folder."
+					end
 					return false, "No file with that name in your workspace folder."
-				end
-				bytes = safeCall(readfile, raw)
-				if type(bytes) ~= "string" or bytes == "" then
-					return false, "Could not read that file."
 				end
 			end
 
@@ -892,7 +962,7 @@ function HomeTab.build(container, T, H, ctx)
 		text(box, "Account picture", UDim2.fromOffset(16, 14), UDim2.new(1, -32, 0, 20),
 			Enum.Font.GothamBold, 14, T.TEXT_COLOR)
 		local hint = text(box,
-			"Paste an image link (PNG or JPG), or the file name of an image in your executor's workspace folder.",
+			"Paste an image link or a file path, or press Browse. Executors can only open files inside their workspace folder.",
 			UDim2.fromOffset(16, 38), UDim2.new(1, -32, 0, 30), Enum.Font.GothamMedium, 11, T.ICON)
 		hint.TextWrapped = true
 		hint.TextYAlignment = Enum.TextYAlignment.Top
@@ -900,7 +970,7 @@ function HomeTab.build(container, T, H, ctx)
 
 		local input = new("TextBox", {
 			Position = UDim2.fromOffset(16, 76),
-			Size = UDim2.new(1, -32, 0, 30),
+			Size = UDim2.new(1, -(32 + 84), 0, 30),
 			BackgroundColor3 = T.CLUSTER_BG,
 			BorderSizePixel = 0,
 			ClearTextOnFocus = false,
@@ -920,11 +990,11 @@ function HomeTab.build(container, T, H, ctx)
 		local status = text(box, "", UDim2.fromOffset(16, 112), UDim2.new(1, -32, 0, 14),
 			Enum.Font.GothamMedium, 11, ACCENT)
 
-		local function makeButton(label, anchorX, xOffset, primary)
+		local function styledButton(parent, label, anchorX, x, y, w, h, primary)
 			local b = new("TextButton", {
 				AnchorPoint = Vector2.new(anchorX, 0),
-				Position = UDim2.new(anchorX, xOffset, 0, 134),
-				Size = UDim2.fromOffset(76, 28),
+				Position = UDim2.new(anchorX, x, 0, y),
+				Size = UDim2.fromOffset(w, h),
 				BackgroundColor3 = primary and ACCENT or T.CLUSTER_BG,
 				BorderSizePixel = 0,
 				AutoButtonColor = false,
@@ -932,7 +1002,7 @@ function HomeTab.build(container, T, H, ctx)
 				Text = label,
 				TextSize = 12,
 				TextColor3 = primary and Color3.new(1, 1, 1) or T.TEXT_COLOR,
-			}, box)
+			}, parent)
 			corner(b, RADIUS)
 			if not primary then
 				stroke(b, T.BORDER, 1, 0)
@@ -947,9 +1017,13 @@ function HomeTab.build(container, T, H, ctx)
 			end)
 			return b
 		end
+		local function makeButton(label, anchorX, xOffset, primary)
+			return styledButton(box, label, anchorX, xOffset, 134, 76, 28, primary)
+		end
 		local saveBtn = makeButton("Save", 1, -16, true)
 		local cancelBtn = makeButton("Cancel", 1, -100, false)
 		local removeBtn = makeButton("Remove", 0, 16, false)
+		local browseBtn = styledButton(box, "Browse", 1, -16, 76, 76, 30, false)
 
 		for _, d in ipairs(box:GetDescendants()) do
 			if d:IsA("GuiObject") then
@@ -998,6 +1072,214 @@ function HomeTab.build(container, T, H, ctx)
 				end
 			end)
 		end
+
+		-- the file picker: the PNG / JPG files of a folder, click a folder to open it, click an image to use it
+		local pickOverlay = new("TextButton", {
+			Name = "PicturePicker",
+			Size = UDim2.fromScale(1, 1),
+			BackgroundColor3 = Color3.new(0, 0, 0),
+			BackgroundTransparency = 0.45,
+			BorderSizePixel = 0,
+			AutoButtonColor = false,
+			Text = "",
+			Visible = false,
+			ZIndex = 30,
+		}, root)
+		local pickBox = new("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromOffset(330, 268),
+			BackgroundColor3 = T.SIDEBAR_BG,
+			BorderSizePixel = 0,
+			Active = true,
+			ZIndex = 31,
+		}, pickOverlay)
+		corner(pickBox, RADIUS + 4)
+		stroke(pickBox, T.BORDER, 1, 0)
+
+		text(pickBox, "Pick an image", UDim2.fromOffset(16, 14), UDim2.new(1, -110, 0, 20),
+			Enum.Font.GothamBold, 14, T.TEXT_COLOR)
+		local pickCancel = styledButton(pickBox, "Cancel", 1, -16, 10, 70, 26, false)
+		local pickUp = styledButton(pickBox, "Up", 0, 16, 42, 44, 24, false)
+		local pickHome = styledButton(pickBox, "Workspace", 0, 66, 42, 84, 24, false)
+		local pickDownloads = styledButton(pickBox, "Downloads", 0, 156, 42, 84, 24, false)
+		local pickPath = text(pickBox, "", UDim2.fromOffset(16, 72), UDim2.new(1, -32, 0, 14),
+			Enum.Font.GothamMedium, 11, T.ICON)
+		local pickList = new("ScrollingFrame", {
+			Position = UDim2.fromOffset(16, 92),
+			Size = UDim2.new(1, -32, 0, 148),
+			BackgroundColor3 = T.CLUSTER_BG,
+			BorderSizePixel = 0,
+			ScrollBarThickness = 4,
+			ScrollBarImageColor3 = T.BORDER,
+			CanvasSize = UDim2.new(),
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		}, pickBox)
+		corner(pickList, RADIUS)
+		stroke(pickList, T.BORDER, 1, 0)
+		new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }, pickList)
+		local pickStatus = text(pickBox, "", UDim2.fromOffset(16, 246), UDim2.new(1, -32, 0, 14),
+			Enum.Font.GothamMedium, 11, ACCENT)
+
+		for _, d in ipairs(pickBox:GetDescendants()) do
+			if d:IsA("GuiObject") then
+				d.ZIndex = 32
+			end
+		end
+
+		local pickDir = ""
+		local pickRows = {}
+
+		local function baseName(path)
+			return string.match(path, "([^/\\]+)$") or path
+		end
+
+		local function isImageName(name)
+			local lowered = string.lower(name)
+			return string.match(lowered, "%.png$") ~= nil or string.match(lowered, "%.jpe?g$") ~= nil
+		end
+
+		local function listDir(dir)
+			local list = safeCall(listfiles, dir)
+			if list == nil and dir == "" then
+				list = safeCall(listfiles, ".")
+			end
+			if type(list) == "table" then
+				return list
+			end
+			return nil
+		end
+
+		local function parentOf(dir)
+			if dir == "" then
+				return ".."
+			end
+			if not string.find(dir, "[^%.%./\\]") then
+				return dir .. "/.."
+			end
+			return string.match(dir, "^(.*)[/\\][^/\\]+$") or ""
+		end
+
+		local function choose(path)
+			pickOverlay.Visible = false
+			input.Text = path
+			save()
+		end
+
+		local function addRow(label, color, onClick)
+			local row = new("TextButton", {
+				LayoutOrder = #pickRows + 1,
+				Size = UDim2.new(1, 0, 0, 26),
+				BackgroundColor3 = T.BORDER,
+				BackgroundTransparency = 1,
+				BorderSizePixel = 0,
+				AutoButtonColor = false,
+				Font = Enum.Font.GothamMedium,
+				Text = label,
+				TextSize = 12,
+				TextColor3 = color,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				ZIndex = 32,
+			}, pickList)
+			new("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10) }, row)
+			row.MouseEnter:Connect(function()
+				row.BackgroundTransparency = 0.4
+			end)
+			row.MouseLeave:Connect(function()
+				row.BackgroundTransparency = 1
+			end)
+			row.Activated:Connect(onClick)
+			pickRows[#pickRows + 1] = row
+		end
+
+		local showDir
+		showDir = function(dir)
+			local list = listDir(dir)
+			if list == nil then
+				pickStatus.Text = "Your executor can't open that folder."
+				return false
+			end
+			pickDir = dir
+			for i = 1, #pickRows do
+				pickRows[i]:Destroy()
+			end
+			pickRows = {}
+			pickStatus.Text = ""
+			if dir == "" then
+				pickPath.Text = "Workspace folder"
+			else
+				pickPath.Text = dir
+			end
+
+			local folders = {}
+			local files = {}
+			for i = 1, #list do
+				local path = list[i]
+				if safeCall(isfolder, path) == true then
+					folders[#folders + 1] = path
+				elseif isImageName(baseName(path)) then
+					files[#files + 1] = path
+				end
+			end
+			local function byName(a, b)
+				return string.lower(baseName(a)) < string.lower(baseName(b))
+			end
+			table.sort(folders, byName)
+			table.sort(files, byName)
+
+			for i = 1, math.min(#folders, 100) do
+				local path = folders[i]
+				addRow(baseName(path) .. "/", T.ICON_HOVER, function()
+					showDir(path)
+				end)
+			end
+			for i = 1, math.min(#files, 150) do
+				local path = files[i]
+				addRow(baseName(path), T.TEXT_COLOR, function()
+					choose(path)
+				end)
+			end
+			if #folders == 0 and #files == 0 then
+				pickStatus.Text = "No PNG or JPG images in this folder."
+			end
+			pickList.CanvasPosition = Vector2.new(0, 0)
+			return true
+		end
+
+		local function openDownloads()
+			local prefixes = { "", "../", "../../", "../../../", "../../../../", "../../../../../" }
+			for i = 1, #prefixes do
+				local candidate = prefixes[i] .. "Downloads"
+				if listDir(candidate) ~= nil then
+					showDir(candidate)
+					return
+				end
+			end
+			pickStatus.Text = "Your executor can't open the Downloads folder."
+		end
+
+		local function openPicker()
+			pickOverlay.Visible = true
+			if not showDir(pickDir) then
+				showDir("")
+			end
+		end
+
+		pickOverlay.Activated:Connect(function()
+			pickOverlay.Visible = false
+		end)
+		pickCancel.Activated:Connect(function()
+			pickOverlay.Visible = false
+		end)
+		pickUp.Activated:Connect(function()
+			showDir(parentOf(pickDir))
+		end)
+		pickHome.Activated:Connect(function()
+			showDir("")
+		end)
+		pickDownloads.Activated:Connect(openDownloads)
+		browseBtn.Activated:Connect(openPicker)
 
 		saveBtn.Activated:Connect(save)
 		cancelBtn.Activated:Connect(closeDialog)
