@@ -32,7 +32,7 @@
 -- * membership: "Lifetime membership", or "Expires in 3d 4h" (live) for a timed key
 --   (reads lifetime / key_expires_at from getgenv().Y1_SESSION)
 -- * Current session: the tile shows the icon of the game you are in (until it loads, the first letter of the game)
--- * Account picture: double-click the Account icon to set a picture. Paste an image link (PNG or JPG) or the
+-- * Account picture: click the Account icon to set a picture. Paste an image link (PNG or JPG) or the
 --   file name of an image in your executor's workspace folder. It is copied to  Y1/account_<name>_<time>.png|jpg
 --   and remembered in  Y1/account_<name>.txt , so it is still there next time. "Remove" brings the icon back.
 --   (needs writefile / readfile / getcustomasset in your executor)
@@ -549,13 +549,71 @@ function HomeTab.build(container, T, H, ctx)
 	end)
 
 	---------------------------------------------------------------------
+	-- FILES AND DOWNLOADS (shared by the game icon and the account picture)
+	---------------------------------------------------------------------
+	local FOLDER = "Y1"
+	local HttpService = game:GetService("HttpService")
+
+	local function safeCall(fn, ...)
+		local ok, res = pcall(fn, ...)
+		if ok then
+			return res
+		end
+		return nil
+	end
+
+	local function ensureFolder()
+		if safeCall(isfolder, FOLDER) ~= true then
+			pcall(makefolder, FOLDER)
+		end
+	end
+
+	local function customAsset(path)
+		local fn = getcustomasset or getsynasset
+		if not fn then
+			return nil
+		end
+		local ok, res = pcall(fn, path)
+		if ok and type(res) == "string" and res ~= "" then
+			return res
+		end
+		return nil
+	end
+
+	local function download(url)
+		local req = (syn and syn.request) or (http and http.request) or http_request or request
+		if req then
+			local ok, res = pcall(req, { Url = url, Method = "GET" })
+			if ok and type(res) == "table" and res.StatusCode == 200
+				and type(res.Body) == "string" and res.Body ~= "" then
+				return res.Body
+			end
+		end
+		local ok2, body = pcall(function()
+			return game:HttpGet(url)
+		end)
+		if ok2 and type(body) == "string" and body ~= "" then
+			return body
+		end
+		return nil
+	end
+
+	local function imageType(bytes)
+		if string.sub(bytes, 1, 4) == "\137PNG" then
+			return "png"
+		end
+		if string.sub(bytes, 1, 3) == "\255\216\255" then
+			return "jpg"
+		end
+		return nil
+	end
+
+	---------------------------------------------------------------------
 	-- GAME ICON (the Current session tile shows the icon of the game you are in)
 	---------------------------------------------------------------------
 	do
-		local initial = string.upper(string.sub(game.Name, 1, 1))
-		if initial == "" then
-			initial = "?"
-		end
+		local universe = game.GameId
+		local initial = string.upper(string.match(game.Name, "%w") or "?")
 		local letter = new("TextLabel", {
 			BackgroundTransparency = 1,
 			Size = UDim2.fromScale(1, 1),
@@ -563,6 +621,7 @@ function HomeTab.build(container, T, H, ctx)
 			Text = initial,
 			TextSize = 18,
 			TextColor3 = T.ICON_HOVER,
+			ZIndex = 1,
 		}, sesTile)
 		local gameIcon = new("ImageLabel", {
 			Name = "GameIcon",
@@ -571,71 +630,115 @@ function HomeTab.build(container, T, H, ctx)
 			BackgroundTransparency = 1,
 			BorderSizePixel = 0,
 			ScaleType = Enum.ScaleType.Crop,
-			ImageTransparency = 1,
+			ZIndex = 2,
 			Image = "",
 		}, sesTile)
 		corner(gameIcon, RADIUS + 3)
 
-		local function tryImage(url, seconds)
-			gameIcon.Image = url
+		local function waitLoaded(seconds)
+			task.wait()
 			local started = os.clock()
 			while alive and os.clock() - started < seconds do
 				if gameIcon.IsLoaded then
 					return true
 				end
-				task.wait(0.15)
+				task.wait(0.2)
 			end
 			return alive and gameIcon.IsLoaded
 		end
 
-		task.spawn(function()
-			local ok = false
-			if game.GameId ~= 0 then
-				ok = tryImage("rbxthumb://type=GameIcon&id=" .. tostring(game.GameId) .. "&w=150&h=150", 6)
+		-- the icon from roblox's thumbnail service, saved as a local file so it always shows
+		local function iconFromWeb()
+			local names = { "png", "jpg" }
+			for i = 1, #names do
+				local cached = FOLDER .. "/gameicon_" .. tostring(universe) .. "." .. names[i]
+				if safeCall(isfile, cached) == true then
+					local content = customAsset(cached)
+					if content then
+						return content
+					end
+				end
 			end
-			if not ok and alive then
+
+			local body = download("https://thumbnails.roblox.com/v1/games/icons?universeIds=" .. tostring(universe)
+				.. "&size=150x150&format=Png&isCircular=false")
+			if not body then
+				return nil
+			end
+			local ok, data = pcall(function()
+				return HttpService:JSONDecode(body)
+			end)
+			if not ok or type(data) ~= "table" or type(data.data) ~= "table" or type(data.data[1]) ~= "table" then
+				return nil
+			end
+			local url = data.data[1].imageUrl
+			if type(url) ~= "string" or url == "" then
+				return nil
+			end
+			local bytes = download(url)
+			if not bytes then
+				return nil
+			end
+			local ext = imageType(bytes)
+			if not ext then
+				return nil
+			end
+			ensureFolder()
+			local path = FOLDER .. "/gameicon_" .. tostring(universe) .. "." .. ext
+			if not pcall(writefile, path, bytes) then
+				return nil
+			end
+			return customAsset(path)
+		end
+
+		task.spawn(function()
+			local shown = false
+			if universe ~= 0 then
+				gameIcon.Image = "rbxthumb://type=GameIcon&id=" .. tostring(universe) .. "&w=150&h=150"
+				shown = waitLoaded(3)
+			end
+
+			if not shown and alive and universe ~= 0 then
+				local content = iconFromWeb()
+				if content then
+					gameIcon.Image = content
+					shown = waitLoaded(5)
+				end
+			end
+
+			if not shown and alive then
 				local good, info = pcall(function()
 					return MarketplaceService:GetProductInfo(game.PlaceId)
 				end)
 				if good and type(info) == "table" then
 					local assetId = tonumber(info.IconImageAssetId)
 					if assetId and assetId ~= 0 then
-						ok = tryImage("rbxassetid://" .. tostring(assetId), 6)
+						gameIcon.Image = "rbxassetid://" .. tostring(assetId)
+						shown = waitLoaded(5)
 					end
 				end
 			end
-			if ok and alive and gameIcon.Parent then
+
+			if not alive then
+				return
+			end
+			if shown then
 				letter.Visible = false
-				TweenService:Create(gameIcon, TweenInfo.new(0.25), { ImageTransparency = 0 }):Play()
+			else
+				warn("[Y1] could not load the icon of this game")
 			end
 		end)
 	end
 
 	---------------------------------------------------------------------
-	-- ACCOUNT PICTURE (double-click the Account icon; the picture is saved in the executor's workspace folder)
+	-- ACCOUNT PICTURE (click the Account icon; the picture is saved in the executor's workspace folder)
 	---------------------------------------------------------------------
 	do
-		local FOLDER = "Y1"
 		local MAX_BYTES = 6 * 1024 * 1024
-		local DOUBLE_CLICK = 0.45
 		local ACCENT = T.ACCENT or Color3.fromRGB(196, 92, 92)
 		local owner = string.lower(accountName() or "guest")
 		local safe = string.gsub(owner, "[^%w_%-]", "_")
 		local metaPath = FOLDER .. "/account_" .. safe .. ".txt"
-
-		local function safeCall(fn, ...)
-			local ok, res = pcall(fn, ...)
-			if ok then
-				return res
-			end
-			return nil
-		end
-
-		local function ensureFolder()
-			if safeCall(isfolder, FOLDER) ~= true then
-				pcall(makefolder, FOLDER)
-			end
-		end
 
 		local function readMeta()
 			if safeCall(isfile, metaPath) ~= true then
@@ -655,46 +758,6 @@ function HomeTab.build(container, T, H, ctx)
 		local function writeMeta(path)
 			ensureFolder()
 			return (pcall(writefile, metaPath, "file:" .. path))
-		end
-
-		local function customAsset(path)
-			local fn = getcustomasset or getsynasset
-			if not fn then
-				return nil
-			end
-			local ok, res = pcall(fn, path)
-			if ok and type(res) == "string" and res ~= "" then
-				return res
-			end
-			return nil
-		end
-
-		local function download(url)
-			local req = (syn and syn.request) or (http and http.request) or http_request or request
-			if req then
-				local ok, res = pcall(req, { Url = url, Method = "GET" })
-				if ok and type(res) == "table" and res.StatusCode == 200
-					and type(res.Body) == "string" and res.Body ~= "" then
-					return res.Body
-				end
-			end
-			local ok2, body = pcall(function()
-				return game:HttpGet(url)
-			end)
-			if ok2 and type(body) == "string" and body ~= "" then
-				return body
-			end
-			return nil
-		end
-
-		local function imageType(bytes)
-			if string.sub(bytes, 1, 4) == "\137PNG" then
-				return "png"
-			end
-			if string.sub(bytes, 1, 3) == "\255\216\255" then
-				return "jpg"
-			end
-			return nil
 		end
 
 		local avatar = new("ImageLabel", {
@@ -949,7 +1012,7 @@ function HomeTab.build(container, T, H, ctx)
 			end
 		end)
 
-		-- double-click on the Account icon opens the dialog
+		-- one click on the Account icon opens the dialog
 		local tileStroke = accTile:FindFirstChildOfClass("UIStroke")
 		local hit = new("TextButton", {
 			Name = "PictureHit",
@@ -959,16 +1022,7 @@ function HomeTab.build(container, T, H, ctx)
 			Text = "",
 			ZIndex = 5,
 		}, accTile)
-		local lastClick = 0
-		hit.Activated:Connect(function()
-			local now = os.clock()
-			if now - lastClick <= DOUBLE_CLICK then
-				lastClick = 0
-				openDialog()
-			else
-				lastClick = now
-			end
-		end)
+		hit.Activated:Connect(openDialog)
 		hit.MouseEnter:Connect(function()
 			if tileStroke then
 				tileStroke.Color = ACCENT
